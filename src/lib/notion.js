@@ -25,3 +25,25 @@ export async function saveToNotion(protocol) {
   }
   return data?.url || null
 }
+
+// Список сохранённых встреч из Notion (для «Истории встреч» на лендинге).
+export async function listMeetings() {
+  let res
+  try {
+    res = await fetch('/api/list-meetings')
+  } catch {
+    throw new Error('Нет связи с сервером. Проверьте подключение к интернету.')
+  }
+
+  let data = null
+  try {
+    data = await res.json()
+  } catch {
+    /* тело не JSON */
+  }
+
+  if (!res.ok) {
+    throw new Error(data?.error || `Ошибка сервера (${res.status}).`)
+  }
+  return Array.isArray(data?.meetings) ? data.meetings : []
+}

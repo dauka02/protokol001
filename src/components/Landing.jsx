@@ -18,6 +18,8 @@ const SCHEMA_FIELDS = [
   'следующая_встреча',
 ]
 
+import MeetingHistory from './MeetingHistory.jsx'
+
 export default function Landing({ onStart }) {
   return (
     <section className="landing">
@@ -61,6 +63,8 @@ export default function Landing({ onStart }) {
           ))}
         </div>
       </div>
+
+      <MeetingHistory />
     </section>
   )
 }

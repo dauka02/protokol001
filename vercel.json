@@ -6,6 +6,9 @@
     },
     "api/save-to-notion.js": {
       "maxDuration": 30
+    },
+    "api/list-meetings.js": {
+      "maxDuration": 30
     }
   }
 }
