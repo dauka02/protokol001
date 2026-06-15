@@ -3,6 +3,9 @@
   "functions": {
     "api/extract.js": {
       "maxDuration": 60
+    },
+    "api/save-to-notion.js": {
+      "maxDuration": 30
     }
   }
 }

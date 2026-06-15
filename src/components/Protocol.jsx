@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { copySummary, downloadDoc } from '../lib/word.js'
+import { saveToNotion } from '../lib/notion.js'
 
 function Block({ index, title, children }) {
   return (
@@ -28,6 +29,8 @@ function BulletList({ items }) {
 
 export default function Protocol({ protocol, onRestart }) {
   const [toast, setToast] = useState('')
+  // Notion: 'idle' | 'saving' | 'saved' | 'error'
+  const [notion, setNotion] = useState({ status: 'idle', url: '', error: '' })
 
   useEffect(() => {
     if (!toast) return undefined
@@ -49,6 +52,18 @@ export default function Protocol({ protocol, onRestart }) {
     setToast('Документ Word скачивается')
   }
 
+  const handleNotion = async () => {
+    if (notion.status === 'saving') return
+    setNotion({ status: 'saving', url: '', error: '' })
+    try {
+      const url = await saveToNotion(protocol)
+      setNotion({ status: 'saved', url: url || '', error: '' })
+      setToast('Сохранено в Notion')
+    } catch (err) {
+      setNotion({ status: 'error', url: '', error: err.message || 'Ошибка Notion' })
+    }
+  }
+
   const p = protocol
 
   return (
@@ -61,11 +76,45 @@ export default function Protocol({ protocol, onRestart }) {
           <button className="btn btn--ghost" onClick={handleCopy}>
             Копировать саммари
           </button>
+          <button
+            className="btn btn--ghost"
+            onClick={handleNotion}
+            disabled={notion.status === 'saving'}
+          >
+            {notion.status === 'saving' ? (
+              <span className="loader" aria-label="Сохраняю в Notion">
+                <span />
+                <span />
+                <span />
+              </span>
+            ) : notion.status === 'saved' ? (
+              'Сохранено в Notion ✓'
+            ) : (
+              'Сохранить в Notion'
+            )}
+          </button>
           <button className="btn btn--primary" onClick={handleDownload}>
             ↓ Скачать Word
           </button>
         </div>
       </div>
+
+      {notion.status === 'saved' && (
+        <div className="notion-status notion-status--ok">
+          Протокол сохранён в Notion.
+          {notion.url && (
+            <>
+              {' '}
+              <a href={notion.url} target="_blank" rel="noopener noreferrer">
+                Открыть страницу →
+              </a>
+            </>
+          )}
+        </div>
+      )}
+      {notion.status === 'error' && (
+        <div className="notion-status notion-status--error">{notion.error}</div>
+      )}
 
       <article className="doc">
         <header className="doc__head">
