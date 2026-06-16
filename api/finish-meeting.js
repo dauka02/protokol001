@@ -157,32 +157,62 @@ function valueForType(prop, value) {
   }
 }
 
+// Строит свойства строки задачи под реальную схему базы.
+// Заголовок (свойство типа title) заполняется ВСЕГДА значением task["задача"].
+// Остальные поля — по имени свойства (без учёта регистра); пустые пропускаются.
+function buildTaskProps(row, byName, titleEntry) {
+  const props = {}
+
+  // Заголовок «Задача» — обязателен, ставим по фактическому title-свойству.
+  if (titleEntry) {
+    props[titleEntry.name] = { title: [{ type: 'text', text: { content: text(row.задача) } }] }
+  }
+
+  const fields = [
+    ['Ответственный', row.ответственный],
+    ['Срок', row.срок],
+    ['Приоритет', row.приоритет],
+    ['Статус', row.статус],
+    ['Совещание', row.совещание],
+  ]
+  for (const [wantName, value] of fields) {
+    const v = String(value ?? '').trim()
+    if (!v) continue // пустое значение — свойство не добавляем
+    const entry = byName.get(normLower(wantName))
+    if (!entry || entry.prop?.type === 'title') continue // нет свойства / это title — пропуск
+    const built = valueForType(entry.prop, v)
+    if (built) props[entry.name] = built
+  }
+  return props
+}
+
 async function createTasks(token, tasksDbId, p) {
   const задачи = Array.isArray(p.задачи) ? p.задачи : []
   const тема = String(p.тема ?? '').trim() || 'Совещание'
   const дата = typeof p.дата === 'string' ? p.дата.trim() : ''
   const meetingRef = дата ? `${тема} — ${дата}` : тема
 
+  // Читаем РУССКИЕ ключи задачи; строку без текста задачи не создаём.
   const rows = задачи
     .map((t) => {
-      const задача = String(t?.задача ?? '').trim()
+      const задача = String(t?.['задача'] ?? '').trim()
       if (!задача) return null
-      let приоритет = String(t?.приоритет ?? '').trim().toLowerCase()
-      if (!PRIORITIES.includes(приоритет)) приоритет = 'средний'
+      let приоритет = String(t?.['приоритет'] ?? '').trim().toLowerCase()
+      if (приоритет && !PRIORITIES.includes(приоритет)) приоритет = 'средний'
       return {
-        Задача: задача,
-        Ответственный: String(t?.ответственный ?? 'не указан').trim() || 'не указан',
-        Срок: String(t?.срок ?? 'не указан').trim() || 'не указан',
-        Приоритет: приоритет,
-        Статус: 'Новая',
-        Совещание: meetingRef,
+        задача,
+        ответственный: String(t?.['ответственный'] ?? '').trim(),
+        срок: String(t?.['срок'] ?? '').trim(),
+        приоритет,
+        статус: 'Новая',
+        совещание: meetingRef,
       }
     })
     .filter(Boolean)
 
-  if (rows.length === 0) return { created: 0 }
+  if (rows.length === 0) return { created: 0, error: null, sample: null }
 
-  // Схема базы → реальные типы свойств.
+  // Схема базы → реальные типы и имена свойств.
   const schemaRes = await fetch(`https://api.notion.com/v1/databases/${tasksDbId}`, {
     headers: { Authorization: `Bearer ${token}`, 'Notion-Version': NOTION_VERSION },
   })
@@ -192,19 +222,38 @@ async function createTasks(token, tasksDbId, p) {
       unauthorized: 'Нет доступа к базе «Задачи».',
       object_not_found: 'База «Задачи» не найдена (NOTION_TASKS_DB_ID).',
     }
-    throw new Error(map[schemaData?.code] || schemaData?.message || `Ошибка чтения базы «Задачи» (${schemaRes.status}).`)
+    throw new Error(
+      map[schemaData?.code] || schemaData?.message || `Ошибка чтения базы «Задачи» (${schemaRes.status}).`,
+    )
   }
   const schema = schemaData?.properties || {}
 
+  // Индекс свойств по нормализованному имени + поиск title-свойства по типу.
+  const byName = new Map()
+  let titleEntry = null
+  for (const [name, prop] of Object.entries(schema)) {
+    byName.set(normLower(name), { name, prop })
+    if (prop?.type === 'title') titleEntry = { name, prop }
+  }
+
+  // Отладочный пример: что реально уходит в Notion на первую задачу.
+  const sample = {
+    titleProperty: titleEntry?.name || null,
+    values: {
+      Задача: rows[0].задача,
+      Ответственный: rows[0].ответственный,
+      Срок: rows[0].срок,
+      Приоритет: rows[0].приоритет,
+      Статус: rows[0].статус,
+      Совещание: rows[0].совещание,
+    },
+    schemaTypes: Object.fromEntries(Object.entries(schema).map(([n, pr]) => [n, pr?.type])),
+    properties: buildTaskProps(rows[0], byName, titleEntry),
+  }
+
   const results = await Promise.allSettled(
     rows.map((row) => {
-      const properties = {}
-      for (const [name, value] of Object.entries(row)) {
-        const prop = schema[name]
-        if (!prop) continue
-        const built = valueForType(prop, value)
-        if (built) properties[name] = built // не заполнить — пропускаем свойство
-      }
+      const properties = buildTaskProps(row, byName, titleEntry)
       return fetch('https://api.notion.com/v1/pages', {
         method: 'POST',
         headers: notionHeaders(token),
@@ -220,7 +269,7 @@ async function createTasks(token, tasksDbId, p) {
   )
   const created = results.filter((r) => r.status === 'fulfilled').length
   const firstError = results.find((r) => r.status === 'rejected')?.reason?.message || null
-  return { created, error: created < rows.length ? firstError : null }
+  return { created, error: created < rows.length ? firstError : null, sample }
 }
 
 // ============ ШАГ 3: рассылка в Telegram ============
@@ -367,6 +416,7 @@ export default async function handler(req, res) {
     meetingError: null,
     tasksCreated: 0,
     tasksError: null,
+    tasksSample: null,
     telegramSent: 0,
     telegramRecipients: [],
     telegramError: null,
@@ -389,9 +439,10 @@ export default async function handler(req, res) {
     } else if (!notionToken) {
       out.tasksError = 'NOTION_TOKEN не задан'
     } else {
-      const { created, error } = await createTasks(notionToken, tasksDb, p)
+      const { created, error, sample } = await createTasks(notionToken, tasksDb, p)
       out.tasksCreated = created
       out.tasksError = error || null
+      out.tasksSample = sample || null
     }
   } catch (err) {
     out.tasksError = err.message || 'Не удалось создать задачи.'
