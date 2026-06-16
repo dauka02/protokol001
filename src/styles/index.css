@@ -873,8 +873,32 @@ textarea.transcript:focus {
   white-space: nowrap;
 }
 
+.finish-result .finish-step {
+  align-items: flex-start;
+}
+
 .finish-result .finish-step__label {
   font-weight: 500;
+}
+
+.finish-reasons {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.finish-reasons li {
+  font-size: 12.5px;
+  font-weight: 400;
+  color: var(--ink-3);
+}
+
+.finish-reasons li::before {
+  content: '· ';
+  color: var(--danger);
 }
 
 .loader--sm span {

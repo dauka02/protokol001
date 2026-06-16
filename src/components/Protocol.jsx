@@ -68,12 +68,35 @@ function tasksLine(r) {
 }
 
 function telegramLine(r) {
-  const names = r.telegramRecipients.length ? ` (${r.telegramRecipients.join(', ')})` : ''
-  if (!r.telegramError || r.telegramSent > 0) {
+  if (r.telegramError) {
+    const skip = /не настроена/i.test(r.telegramError)
+    return { status: skip ? 'skip' : 'err', node: `В Telegram: ${r.telegramError}` }
+  }
+  if (r.telegramSent > 0) {
+    const names = r.telegramRecipients.length ? ` (${r.telegramRecipients.join(', ')})` : ''
     return { status: 'ok', node: `В Telegram отправлено: ${r.telegramSent}${names}` }
   }
-  const skip = /не настроена/i.test(r.telegramError)
-  return { status: skip ? 'skip' : 'err', node: `В Telegram: ${r.telegramError}` }
+  // Отправлено 0 — показываем причину по каждому ответственному.
+  const failed = (r.telegramReport || []).filter((x) => x.статус !== 'отправлено')
+  return {
+    status: 'err',
+    node: (
+      <>
+        В Telegram отправлено: 0
+        {failed.length > 0 ? (
+          <ul className="finish-reasons mono">
+            {failed.map((x, i) => (
+              <li key={i}>
+                {x.ответственный} — {x.статус}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          ' — нет задач с ответственными'
+        )}
+      </>
+    ),
+  }
 }
 
 const STATUS_ICON = { ok: '✓', err: '✕', skip: '—' }

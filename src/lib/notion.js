@@ -33,6 +33,7 @@ export async function finishMeeting(protocol) {
     tasksError: data?.tasksError || null,
     telegramSent: data?.telegramSent || 0,
     telegramRecipients: Array.isArray(data?.telegramRecipients) ? data.telegramRecipients : [],
+    telegramReport: Array.isArray(data?.telegramReport) ? data.telegramReport : [],
     telegramError: data?.telegramError || null,
   }
 }

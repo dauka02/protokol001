@@ -9,7 +9,7 @@ const NOTION_VERSION = '2022-06-28'
 const TEXT_LIMIT = 2000 // лимит rich_text-фрагмента Notion
 const PRIORITIES = ['высокий', 'средний', 'низкий']
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
-const CHAT_ID = /^-?\d+$/ // числовой chat_id Telegram
+const CHAT_ID = /^\d+$/ // chat_id — только цифры (значение с «+» — телефон, пропускаем)
 
 const text = (v) => String(v ?? '').slice(0, TEXT_LIMIT)
 const normLower = (s) => String(s ?? '').trim().toLowerCase()
@@ -289,6 +289,8 @@ function propToString(prop) {
       return String(prop.select?.name ?? '').trim()
     case 'formula':
       return String(prop.formula?.string ?? prop.formula?.number ?? '').trim()
+    case 'unique_id':
+      return prop.unique_id?.number == null ? '' : String(prop.unique_id.number)
     default:
       return ''
   }
@@ -320,8 +322,9 @@ async function loadContacts(token, contactsDbId) {
       throw new Error(map2[data?.code] || data?.message || `Ошибка Notion (${res.status}).`)
     }
     for (const row of data?.results || []) {
+      // Имя — без учёта регистра и с trim; берём колонку именно «Telegram» (не «Телефон»).
       const name = normLower(readName(row.properties))
-      const telegram = propToString(row.properties?.['Telegram'])
+      const telegram = propToString(row.properties?.['Telegram']).trim()
       if (name && !map.has(name)) map.set(name, telegram)
     }
     if (!data?.has_more) break
@@ -336,12 +339,13 @@ async function sendTelegram(botToken, chatId, message) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: chatId, text: message, disable_web_page_preview: true }),
   })
-  if (!res.ok) {
-    const d = await res.json().catch(() => null)
-    console.error('telegram send error:', res.status, d?.description)
-    return false
+  const data = await res.json().catch(() => null)
+  if (!res.ok || data?.ok === false) {
+    const desc = data?.description || `HTTP ${res.status}`
+    console.error('telegram send error:', res.status, desc)
+    return { ok: false, error: desc }
   }
-  return true
+  return { ok: true, error: null }
 }
 
 async function notifyTelegram(notionToken, botToken, contactsDbId, p) {
@@ -352,39 +356,55 @@ async function notifyTelegram(notionToken, botToken, contactsDbId, p) {
   // Группируем задачи по ответственному.
   const byPerson = new Map()
   for (const t of задачи) {
-    const задача = String(t?.задача ?? '').trim()
+    const задача = String(t?.['задача'] ?? '').trim()
     if (!задача) continue
-    const person = String(t?.ответственный ?? '').trim()
+    const person = String(t?.['ответственный'] ?? '').trim()
     if (!person || normLower(person) === 'не указан') continue
     if (!byPerson.has(person)) byPerson.set(person, [])
     byPerson.get(person).push({
       задача,
-      срок: String(t?.срок ?? 'не указан').trim() || 'не указан',
-      приоритет: String(t?.приоритет ?? 'средний').trim() || 'средний',
+      срок: String(t?.['срок'] ?? 'не указан').trim() || 'не указан',
+      приоритет: String(t?.['приоритет'] ?? 'средний').trim() || 'средний',
     })
   }
-  if (byPerson.size === 0) return { sent: 0, recipients: [] }
+  if (byPerson.size === 0) return { sent: 0, recipients: [], report: [] }
 
   const contacts = await loadContacts(notionToken, contactsDbId)
   const dateLabel = дата ? ` (${дата})` : ''
   const recipients = []
+  const report = [] // диагностика по каждому ответственному
   let sent = 0
 
   for (const [person, tasks] of byPerson) {
-    const telegram = contacts.get(normLower(person)) || ''
-    if (!CHAT_ID.test(telegram)) continue // нет контакта / не числовой chat_id — пропуск
+    const key = normLower(person)
+    // Сопоставляем имя без учёта регистра и с trim.
+    if (!contacts.has(key)) {
+      report.push({ ответственный: person, статус: 'контакт не найден' })
+      continue
+    }
+    const telegram = (contacts.get(key) || '').trim()
+    if (!CHAT_ID.test(telegram)) {
+      report.push({
+        ответственный: person,
+        статус: `нет числового chat_id (значение: ${telegram || 'пусто'})`,
+      })
+      continue
+    }
     const lines = tasks.map(
       (t) => `— ${t.задача} · срок: ${t.срок} · приоритет: ${t.приоритет}`,
     )
     const message = `Совещание: ${тема}${dateLabel}\nТвои задачи:\n${lines.join('\n')}`
     // eslint-disable-next-line no-await-in-loop
-    const ok = await sendTelegram(botToken, telegram, message)
+    const { ok, error } = await sendTelegram(botToken, telegram, message)
     if (ok) {
       sent += 1
       recipients.push(person)
+      report.push({ ответственный: person, статус: 'отправлено' })
+    } else {
+      report.push({ ответственный: person, статус: `ошибка Telegram: ${error}` })
     }
   }
-  return { sent, recipients }
+  return { sent, recipients, report }
 }
 
 // ============ обработчик ============
@@ -420,6 +440,7 @@ export default async function handler(req, res) {
     tasksSample: null,
     telegramSent: 0,
     telegramRecipients: [],
+    telegramReport: [],
     telegramError: null,
   }
 
@@ -457,9 +478,10 @@ export default async function handler(req, res) {
     } else if (!notionToken) {
       out.telegramError = 'NOTION_TOKEN не задан'
     } else {
-      const { sent, recipients } = await notifyTelegram(notionToken, botToken, contactsDb, p)
+      const { sent, recipients, report } = await notifyTelegram(notionToken, botToken, contactsDb, p)
       out.telegramSent = sent
       out.telegramRecipients = recipients
+      out.telegramReport = report || []
     }
   } catch (err) {
     out.telegramError = err.message || 'Не удалось отправить в Telegram.'
