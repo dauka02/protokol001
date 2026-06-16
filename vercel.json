@@ -4,13 +4,10 @@
     "api/extract.js": {
       "maxDuration": 60
     },
-    "api/save-to-notion.js": {
-      "maxDuration": 30
+    "api/finish-meeting.js": {
+      "maxDuration": 60
     },
     "api/list-meetings.js": {
-      "maxDuration": 30
-    },
-    "api/notify-telegram.js": {
       "maxDuration": 30
     }
   }

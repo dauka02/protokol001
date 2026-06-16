@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { copySummary, downloadDoc } from '../lib/word.js'
-import { notifyTelegram, saveToNotion } from '../lib/notion.js'
+import { finishMeeting } from '../lib/notion.js'
 
 function Block({ index, title, children }) {
   return (
@@ -27,38 +27,61 @@ function BulletList({ items }) {
   )
 }
 
-// «N задач» с правильным склонением.
-function plural(n, one, few, many) {
-  const m10 = n % 10
-  const m100 = n % 100
-  if (m10 === 1 && m100 !== 11) return one
-  if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few
-  return many
-}
-
-const tasksWord = (n) => `${n} ${plural(n, 'задача', 'задачи', 'задач')}`
-
-// Текстовый итог по строкам в базе «Задачи».
-function tasksSummary(tasks) {
-  if (!tasks || !tasks.configured) return ''
-  if (tasks.error) {
-    return tasks.created > 0
-      ? ` + ${tasksWord(tasks.created)} (часть с ошибкой: ${tasks.error})`
-      : ` · задачи не созданы: ${tasks.error}`
+// Три строки результата «Завершить совещание». Каждая — { status, node }.
+function meetingLine(r) {
+  if (r.meetingSaved) {
+    return {
+      status: 'ok',
+      node: (
+        <>
+          Протокол сохранён
+          {r.meetingUrl && (
+            <>
+              {' · '}
+              <a href={r.meetingUrl} target="_blank" rel="noopener noreferrer">
+                Открыть страницу →
+              </a>
+            </>
+          )}
+        </>
+      ),
+    }
   }
-  return ` + ${tasksWord(tasks.created)}`
+  return {
+    status: 'err',
+    node: `Протокол не сохранён${r.meetingError ? `: ${r.meetingError}` : ''}`,
+  }
 }
+
+function tasksLine(r) {
+  if (!r.tasksError) {
+    return { status: 'ok', node: `Задач в трекере: ${r.tasksCreated}` }
+  }
+  if (r.tasksCreated > 0) {
+    return {
+      status: 'ok',
+      node: `Задач в трекере: ${r.tasksCreated} (часть с ошибкой: ${r.tasksError})`,
+    }
+  }
+  const skip = /не подключена/i.test(r.tasksError)
+  return { status: skip ? 'skip' : 'err', node: `Задачи в трекере: ${r.tasksError}` }
+}
+
+function telegramLine(r) {
+  const names = r.telegramRecipients.length ? ` (${r.telegramRecipients.join(', ')})` : ''
+  if (!r.telegramError || r.telegramSent > 0) {
+    return { status: 'ok', node: `В Telegram отправлено: ${r.telegramSent}${names}` }
+  }
+  const skip = /не настроена/i.test(r.telegramError)
+  return { status: skip ? 'skip' : 'err', node: `В Telegram: ${r.telegramError}` }
+}
+
+const STATUS_ICON = { ok: '✓', err: '✕', skip: '—' }
 
 export default function Protocol({ protocol, onRestart }) {
   const [toast, setToast] = useState('')
-  // Notion: 'idle' | 'saving' | 'saved' | 'error'
-  const [notion, setNotion] = useState({ status: 'idle', url: '', error: '', tasks: null })
-  // Telegram: 'idle' | 'sending' | 'sent' | 'error'
-  const [tg, setTg] = useState({ status: 'idle', sent: 0, recipients: [], error: '' })
-  // Цепочка «Завершить совещание»: список шагов с прогрессом.
-  const [finish, setFinish] = useState({ running: false, steps: [] })
-
-  const hasTasks = Array.isArray(protocol.задачи) && protocol.задачи.length > 0
+  // 'idle' | 'running' | 'done'
+  const [finish, setFinish] = useState({ state: 'idle', result: null, error: '' })
 
   useEffect(() => {
     if (!toast) return undefined
@@ -80,88 +103,21 @@ export default function Protocol({ protocol, onRestart }) {
     setToast('Документ Word скачивается')
   }
 
-  const handleNotion = async () => {
-    if (notion.status === 'saving') return
-    setNotion({ status: 'saving', url: '', error: '', tasks: null })
-    try {
-      const { url, tasks } = await saveToNotion(protocol)
-      setNotion({ status: 'saved', url: url || '', error: '', tasks })
-      setToast('Сохранено в Notion')
-    } catch (err) {
-      setNotion({ status: 'error', url: '', error: err.message || 'Ошибка Notion', tasks: null })
-    }
-  }
-
-  const handleTelegram = async () => {
-    if (tg.status === 'sending') return
-    setTg({ status: 'sending', sent: 0, recipients: [], error: '' })
-    try {
-      const { sent, recipients } = await notifyTelegram(protocol)
-      setTg({ status: 'sent', sent, recipients, error: '' })
-      setToast(sent > 0 ? `Отправлено: ${sent}` : 'Никому не отправлено')
-    } catch (err) {
-      setTg({ status: 'error', sent: 0, recipients: [], error: err.message || 'Ошибка Telegram' })
-    }
-  }
-
-  // «Завершить совещание»: сохранить протокол + задачи, затем разослать в Telegram.
+  // Один запрос: протокол + задачи + рассылка в Telegram.
   const handleFinish = async () => {
-    if (finish.running) return
-    const steps = [
-      { key: 'protocol', label: 'Сохраняю протокол', status: 'run', detail: '' },
-      { key: 'tasks', label: 'Создаю задачи', status: 'wait', detail: '' },
-      { key: 'telegram', label: 'Отправляю в Telegram', status: 'wait', detail: '' },
-    ]
-    setFinish({ running: true, steps })
-    const set = (key, patch) =>
-      setFinish((f) => ({
-        ...f,
-        steps: f.steps.map((s) => (s.key === key ? { ...s, ...patch } : s)),
-      }))
-
-    // Шаг 1–2: сохранение страницы и строк задач (один запрос).
-    let saved
+    if (finish.state === 'running') return
+    setFinish({ state: 'running', result: null, error: '' })
     try {
-      saved = await saveToNotion(protocol)
-      set('protocol', { status: 'ok', detail: '' })
-      setNotion({ status: 'saved', url: saved.url || '', error: '', tasks: saved.tasks })
+      const result = await finishMeeting(protocol)
+      setFinish({ state: 'done', result, error: '' })
+      setToast('Совещание завершено')
     } catch (err) {
-      set('protocol', { status: 'err', detail: err.message || 'ошибка' })
-      set('tasks', { status: 'skip', detail: 'пропущено' })
-      set('telegram', { status: 'skip', detail: 'пропущено' })
-      setFinish((f) => ({ ...f, running: false }))
-      return
+      setFinish({ state: 'idle', result: null, error: err.message || 'Ошибка' })
     }
-
-    const t = saved.tasks || { configured: false, created: 0, error: null }
-    if (!t.configured) {
-      set('tasks', { status: 'skip', detail: 'база не подключена' })
-    } else if (t.error && t.created === 0) {
-      set('tasks', { status: 'err', detail: t.error })
-    } else if (t.error) {
-      set('tasks', { status: 'ok', detail: `${t.created}, часть с ошибкой` })
-    } else {
-      set('tasks', { status: 'ok', detail: String(t.created) })
-    }
-
-    // Шаг 3: рассылка в Telegram.
-    if (!hasTasks) {
-      set('telegram', { status: 'skip', detail: 'нет задач' })
-      setFinish((f) => ({ ...f, running: false }))
-      return
-    }
-    set('telegram', { status: 'run' })
-    try {
-      const { sent, recipients } = await notifyTelegram(protocol)
-      set('telegram', { status: 'ok', detail: String(sent) })
-      setTg({ status: 'sent', sent, recipients, error: '' })
-    } catch (err) {
-      set('telegram', { status: 'err', detail: err.message || 'ошибка' })
-    }
-    setFinish((f) => ({ ...f, running: false }))
   }
 
   const p = protocol
+  const r = finish.result
 
   return (
     <section className="protocol">
@@ -170,12 +126,18 @@ export default function Protocol({ protocol, onRestart }) {
           ← Новая встреча
         </button>
         <div className="protocol__bar-actions">
+          <button className="btn btn--ghost" onClick={handleCopy}>
+            Копировать саммари
+          </button>
+          <button className="btn btn--ghost" onClick={handleDownload}>
+            ↓ Скачать Word
+          </button>
           <button
-            className="btn btn--accent"
+            className="btn btn--accent btn--lg"
             onClick={handleFinish}
-            disabled={finish.running}
+            disabled={finish.state === 'running'}
           >
-            {finish.running ? (
+            {finish.state === 'running' ? (
               <span className="loader" aria-label="Завершаю совещание">
                 <span />
                 <span />
@@ -185,105 +147,24 @@ export default function Protocol({ protocol, onRestart }) {
               '✦ Завершить совещание'
             )}
           </button>
-          <button className="btn btn--ghost" onClick={handleCopy}>
-            Копировать саммари
-          </button>
-          <button
-            className="btn btn--ghost"
-            onClick={handleNotion}
-            disabled={notion.status === 'saving'}
-          >
-            {notion.status === 'saving' ? (
-              <span className="loader" aria-label="Сохраняю в Notion">
-                <span />
-                <span />
-                <span />
-              </span>
-            ) : notion.status === 'saved' ? (
-              'Сохранено в Notion ✓'
-            ) : (
-              'Сохранить в Notion'
-            )}
-          </button>
-          <button
-            className="btn btn--ghost"
-            onClick={handleTelegram}
-            disabled={tg.status === 'sending' || !hasTasks}
-            title={hasTasks ? '' : 'В протоколе нет задач'}
-          >
-            {tg.status === 'sending' ? (
-              <span className="loader" aria-label="Отправляю в Telegram">
-                <span />
-                <span />
-                <span />
-              </span>
-            ) : (
-              'Отправить задачи в Telegram'
-            )}
-          </button>
-          <button className="btn btn--primary" onClick={handleDownload}>
-            ↓ Скачать Word
-          </button>
         </div>
       </div>
 
-      {finish.steps.length > 0 && (
-        <ol className="finish-steps">
-          {finish.steps.map((s) => (
-            <li className={`finish-step finish-step--${s.status}`} key={s.key}>
+      {finish.error && (
+        <div className="notion-status notion-status--error">{finish.error}</div>
+      )}
+
+      {r && (
+        <ol className="finish-steps finish-result">
+          {[meetingLine(r), tasksLine(r), telegramLine(r)].map((l, i) => (
+            <li className={`finish-step finish-step--${l.status}`} key={i}>
               <span className="finish-step__icon" aria-hidden="true">
-                {s.status === 'run' ? (
-                  <span className="loader loader--sm">
-                    <span />
-                    <span />
-                    <span />
-                  </span>
-                ) : s.status === 'ok' ? (
-                  '✓'
-                ) : s.status === 'err' ? (
-                  '✕'
-                ) : s.status === 'skip' ? (
-                  '—'
-                ) : (
-                  '·'
-                )}
+                {STATUS_ICON[l.status]}
               </span>
-              <span className="finish-step__label">{s.label}</span>
-              {s.detail && <span className="finish-step__detail mono">{s.detail}</span>}
+              <span className="finish-step__label">{l.node}</span>
             </li>
           ))}
         </ol>
-      )}
-
-      {notion.status === 'saved' && (
-        <div className="notion-status notion-status--ok">
-          Сохранено: протокол{tasksSummary(notion.tasks)}.
-          {notion.url && (
-            <>
-              {' '}
-              <a href={notion.url} target="_blank" rel="noopener noreferrer">
-                Открыть страницу →
-              </a>
-            </>
-          )}
-        </div>
-      )}
-      {notion.status === 'error' && (
-        <div className="notion-status notion-status--error">{notion.error}</div>
-      )}
-
-      {tg.status === 'sent' && (
-        <div className="notion-status notion-status--ok">
-          {tg.sent > 0
-            ? `Отправлено: ${tg.sent} ${tg.sent === 1 ? 'сообщение' : 'сообщений'}`
-            : 'Сообщения не отправлены — нет подходящих контактов.'}
-          {tg.recipients.length > 0 && (
-            <span className="mono"> · {tg.recipients.join(', ')}</span>
-          )}
-        </div>
-      )}
-      {tg.status === 'error' && (
-        <div className="notion-status notion-status--error">{tg.error}</div>
       )}
 
       <article className="doc">

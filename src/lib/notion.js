@@ -1,10 +1,12 @@
-// Клиентский вызов serverless-функции /api/save-to-notion.
-// Токены Notion живут только на сервере — здесь их нет.
+// Клиентские вызовы serverless-функций Notion/Telegram.
+// Токены живут только на сервере — здесь их нет.
 
-export async function saveToNotion(protocol) {
+// «Завершить совещание»: сохранить протокол + задачи + рассылка в Telegram.
+// Возвращает единый объект результата (см. /api/finish-meeting).
+export async function finishMeeting(protocol) {
   let res
   try {
-    res = await fetch('/api/save-to-notion', {
+    res = await fetch('/api/finish-meeting', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(protocol),
@@ -24,8 +26,14 @@ export async function saveToNotion(protocol) {
     throw new Error(data?.error || `Ошибка сервера (${res.status}).`)
   }
   return {
-    url: data?.url || null,
-    tasks: data?.tasks || { configured: false, created: 0, total: 0, error: null },
+    meetingSaved: Boolean(data?.meetingSaved),
+    meetingUrl: data?.meetingUrl || null,
+    meetingError: data?.meetingError || null,
+    tasksCreated: data?.tasksCreated || 0,
+    tasksError: data?.tasksError || null,
+    telegramSent: data?.telegramSent || 0,
+    telegramRecipients: Array.isArray(data?.telegramRecipients) ? data.telegramRecipients : [],
+    telegramError: data?.telegramError || null,
   }
 }
 
@@ -49,34 +57,4 @@ export async function listMeetings() {
     throw new Error(data?.error || `Ошибка сервера (${res.status}).`)
   }
   return Array.isArray(data?.meetings) ? data.meetings : []
-}
-
-// Рассылка задач ответственным в Telegram. Возвращает { sent, recipients }.
-export async function notifyTelegram(protocol) {
-  let res
-  try {
-    res = await fetch('/api/notify-telegram', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(protocol),
-    })
-  } catch {
-    throw new Error('Нет связи с сервером. Проверьте подключение к интернету.')
-  }
-
-  let data = null
-  try {
-    data = await res.json()
-  } catch {
-    /* тело не JSON */
-  }
-
-  if (!res.ok) {
-    throw new Error(data?.error || `Ошибка сервера (${res.status}).`)
-  }
-  return {
-    sent: data?.sent || 0,
-    recipients: Array.isArray(data?.recipients) ? data.recipients : [],
-    skipped: Array.isArray(data?.skipped) ? data.skipped : [],
-  }
 }

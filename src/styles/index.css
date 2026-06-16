@@ -867,6 +867,16 @@ textarea.transcript:focus {
   background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 
+.finish-step a {
+  color: var(--ochre);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.finish-result .finish-step__label {
+  font-weight: 500;
+}
+
 .loader--sm span {
   width: 4px;
   height: 4px;
