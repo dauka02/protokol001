@@ -51,6 +51,57 @@ function asStringArray(value) {
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 
+const PRIORITIES = ['высокий', 'средний', 'низкий']
+
+// Создаёт по строке в базе «Задачи» (NOTION_TASKS_DB_ID) на каждую задачу.
+// Возвращает число успешно созданных строк. Не бросает — ошибки логирует.
+async function createTaskRows(token, tasksDbId, задачи, meetingRef) {
+  if (!Array.isArray(задачи) || задачи.length === 0) return 0
+
+  const results = await Promise.allSettled(
+    задачи.map((t) => {
+      const задача = String(t?.задача ?? '').trim()
+      if (!задача) return Promise.resolve(false)
+      const ответственный = String(t?.ответственный ?? 'не указан').trim() || 'не указан'
+      const срок = String(t?.срок ?? 'не указан').trim() || 'не указан'
+      let приоритет = String(t?.приоритет ?? '').trim().toLowerCase()
+      if (!PRIORITIES.includes(приоритет)) приоритет = 'средний'
+
+      const richText = (content) => ({
+        rich_text: [{ type: 'text', text: { content: text(content) } }],
+      })
+
+      const properties = {
+        Задача: { title: [{ type: 'text', text: { content: text(задача) } }] },
+        Ответственный: richText(ответственный),
+        Срок: richText(срок),
+        Приоритет: { select: { name: приоритет } },
+        Статус: { select: { name: 'Новая' } },
+        Совещание: richText(meetingRef),
+      }
+
+      return fetch('https://api.notion.com/v1/pages', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Notion-Version': NOTION_VERSION,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ parent: { database_id: tasksDbId }, properties }),
+      }).then(async (r) => {
+        if (!r.ok) {
+          const d = await r.json().catch(() => null)
+          console.error('task row error:', r.status, d?.code, d?.message)
+          return false
+        }
+        return true
+      })
+    }),
+  )
+
+  return results.filter((r) => r.status === 'fulfilled' && r.value === true).length
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST')
@@ -171,7 +222,19 @@ export default async function handler(req, res) {
       })
     }
 
-    return res.status(200).json({ url: data?.url || null, id: data?.id || null })
+    // Помимо страницы совещания — строки в базе «Задачи» (если она задана).
+    let tasksCreated = 0
+    const tasksDbId = process.env.NOTION_TASKS_DB_ID
+    if (tasksDbId) {
+      const meetingRef = дата ? `${тема} — ${дата}` : тема
+      tasksCreated = await createTaskRows(token, tasksDbId, задачи, meetingRef)
+    }
+
+    return res.status(200).json({
+      url: data?.url || null,
+      id: data?.id || null,
+      tasksCreated,
+    })
   } catch (err) {
     console.error('save-to-notion error:', err?.message || err)
     return res.status(502).json({ error: 'Не удалось связаться с Notion. Попробуйте позже.' })

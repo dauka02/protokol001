@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { copySummary, downloadDoc } from '../lib/word.js'
-import { saveToNotion } from '../lib/notion.js'
+import { notifyTelegram, saveToNotion } from '../lib/notion.js'
 
 function Block({ index, title, children }) {
   return (
@@ -31,6 +31,10 @@ export default function Protocol({ protocol, onRestart }) {
   const [toast, setToast] = useState('')
   // Notion: 'idle' | 'saving' | 'saved' | 'error'
   const [notion, setNotion] = useState({ status: 'idle', url: '', error: '' })
+  // Telegram: 'idle' | 'sending' | 'sent' | 'error'
+  const [tg, setTg] = useState({ status: 'idle', sent: 0, recipients: [], error: '' })
+
+  const hasTasks = Array.isArray(protocol.задачи) && protocol.задачи.length > 0
 
   useEffect(() => {
     if (!toast) return undefined
@@ -64,6 +68,18 @@ export default function Protocol({ protocol, onRestart }) {
     }
   }
 
+  const handleTelegram = async () => {
+    if (tg.status === 'sending') return
+    setTg({ status: 'sending', sent: 0, recipients: [], error: '' })
+    try {
+      const { sent, recipients } = await notifyTelegram(protocol)
+      setTg({ status: 'sent', sent, recipients, error: '' })
+      setToast(sent > 0 ? `Отправлено: ${sent}` : 'Никому не отправлено')
+    } catch (err) {
+      setTg({ status: 'error', sent: 0, recipients: [], error: err.message || 'Ошибка Telegram' })
+    }
+  }
+
   const p = protocol
 
   return (
@@ -93,6 +109,22 @@ export default function Protocol({ protocol, onRestart }) {
               'Сохранить в Notion'
             )}
           </button>
+          <button
+            className="btn btn--ghost"
+            onClick={handleTelegram}
+            disabled={tg.status === 'sending' || !hasTasks}
+            title={hasTasks ? '' : 'В протоколе нет задач'}
+          >
+            {tg.status === 'sending' ? (
+              <span className="loader" aria-label="Отправляю в Telegram">
+                <span />
+                <span />
+                <span />
+              </span>
+            ) : (
+              'Отправить задачи в Telegram'
+            )}
+          </button>
           <button className="btn btn--primary" onClick={handleDownload}>
             ↓ Скачать Word
           </button>
@@ -114,6 +146,20 @@ export default function Protocol({ protocol, onRestart }) {
       )}
       {notion.status === 'error' && (
         <div className="notion-status notion-status--error">{notion.error}</div>
+      )}
+
+      {tg.status === 'sent' && (
+        <div className="notion-status notion-status--ok">
+          {tg.sent > 0
+            ? `Отправлено: ${tg.sent} ${tg.sent === 1 ? 'сообщение' : 'сообщений'}`
+            : 'Сообщения не отправлены — нет подходящих контактов.'}
+          {tg.recipients.length > 0 && (
+            <span className="mono"> · {tg.recipients.join(', ')}</span>
+          )}
+        </div>
+      )}
+      {tg.status === 'error' && (
+        <div className="notion-status notion-status--error">{tg.error}</div>
       )}
 
       <article className="doc">

@@ -47,3 +47,33 @@ export async function listMeetings() {
   }
   return Array.isArray(data?.meetings) ? data.meetings : []
 }
+
+// Рассылка задач ответственным в Telegram. Возвращает { sent, recipients }.
+export async function notifyTelegram(protocol) {
+  let res
+  try {
+    res = await fetch('/api/notify-telegram', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(protocol),
+    })
+  } catch {
+    throw new Error('Нет связи с сервером. Проверьте подключение к интернету.')
+  }
+
+  let data = null
+  try {
+    data = await res.json()
+  } catch {
+    /* тело не JSON */
+  }
+
+  if (!res.ok) {
+    throw new Error(data?.error || `Ошибка сервера (${res.status}).`)
+  }
+  return {
+    sent: data?.sent || 0,
+    recipients: Array.isArray(data?.recipients) ? data.recipients : [],
+    skipped: Array.isArray(data?.skipped) ? data.skipped : [],
+  }
+}

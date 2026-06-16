@@ -9,6 +9,9 @@
     },
     "api/list-meetings.js": {
       "maxDuration": 30
+    },
+    "api/notify-telegram.js": {
+      "maxDuration": 30
     }
   }
 }
