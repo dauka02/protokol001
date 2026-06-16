@@ -404,11 +404,12 @@ export default async function handler(req, res) {
   }
   const p = body && typeof body === 'object' ? body : {}
 
-  const notionToken = process.env.NOTION_TOKEN
-  const meetingsDb = process.env.NOTION_DATABASE_ID
-  const tasksDb = process.env.NOTION_TASKS_DB_ID
-  const botToken = process.env.TELEGRAM_BOT_TOKEN
-  const contactsDb = process.env.NOTION_CONTACTS_DB_ID
+  // Все id/токены читаем с .trim() — лишние пробелы ломают URL (%20 в пути).
+  const notionToken = (process.env.NOTION_TOKEN || '').trim()
+  const meetingsDb = (process.env.NOTION_DATABASE_ID || '').trim()
+  const tasksDb = (process.env.NOTION_TASKS_DB_ID || '').trim()
+  const botToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim()
+  const contactsDb = (process.env.NOTION_CONTACTS_DB_ID || '').trim()
 
   const out = {
     meetingSaved: false,

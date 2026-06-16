@@ -29,8 +29,8 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Метод не поддерживается.' })
   }
 
-  const token = process.env.NOTION_TOKEN
-  const databaseId = process.env.NOTION_DATABASE_ID
+  const token = (process.env.NOTION_TOKEN || '').trim()
+  const databaseId = (process.env.NOTION_DATABASE_ID || '').trim()
   if (!token || !databaseId) {
     return res.status(500).json({
       error:
