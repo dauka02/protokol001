@@ -23,7 +23,10 @@ export async function saveToNotion(protocol) {
   if (!res.ok) {
     throw new Error(data?.error || `Ошибка сервера (${res.status}).`)
   }
-  return data?.url || null
+  return {
+    url: data?.url || null,
+    tasks: data?.tasks || { configured: false, created: 0, total: 0, error: null },
+  }
 }
 
 // Список сохранённых встреч из Notion (для «Истории встреч» на лендинге).

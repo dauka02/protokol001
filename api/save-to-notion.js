@@ -51,33 +51,100 @@ function asStringArray(value) {
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 
-const PRIORITIES = ['высокий', 'средний', 'низкий']
+// Подбирает имя select/status-опции по факту (без учёта регистра),
+// иначе возвращает желаемое значение как есть.
+function matchOption(prop, desired) {
+  const options = prop?.[prop.type]?.options
+  if (Array.isArray(options)) {
+    const found = options.find((o) => normLower(o?.name) === normLower(desired))
+    if (found) return found.name
+  }
+  return desired
+}
 
-// Создаёт по строке в базе «Задачи» (NOTION_TASKS_DB_ID) на каждую задачу.
-// Возвращает число успешно созданных строк. Не бросает — ошибки логирует.
+const normLower = (s) => String(s ?? '').trim().toLowerCase()
+
+// Строит значение свойства Notion под ФАКТИЧЕСКИЙ тип из схемы базы.
+// Возвращает undefined, если значение пустое или тип не подходит.
+function valueForType(prop, value) {
+  const v = String(value ?? '').trim()
+  switch (prop?.type) {
+    case 'title':
+      return { title: [{ type: 'text', text: { content: text(v) } }] }
+    case 'rich_text':
+      return { rich_text: [{ type: 'text', text: { content: text(v) } }] }
+    case 'select':
+      return v ? { select: { name: matchOption(prop, v) } } : undefined
+    case 'status':
+      return v ? { status: { name: matchOption(prop, v) } } : undefined
+    case 'date':
+      return ISO_DATE.test(v) ? { date: { start: v } } : undefined
+    case 'number': {
+      const n = Number(v.replace(',', '.'))
+      return v && !Number.isNaN(n) ? { number: n } : undefined
+    }
+    case 'url':
+      return v ? { url: v } : undefined
+    case 'email':
+      return v ? { email: v } : undefined
+    case 'phone_number':
+      return v ? { phone_number: v } : undefined
+    default:
+      return undefined // people / relation / files и пр. — пропускаем
+  }
+}
+
+// Загружает схему базы «Задачи» → map имя свойства → дескриптор (с типом).
+async function fetchTaskSchema(token, tasksDbId) {
+  const res = await fetch(`https://api.notion.com/v1/databases/${tasksDbId}`, {
+    headers: { Authorization: `Bearer ${token}`, 'Notion-Version': NOTION_VERSION },
+  })
+  const data = await res.json().catch(() => null)
+  if (!res.ok) {
+    const err = new Error(data?.message || `Ошибка чтения базы «Задачи» (${res.status}).`)
+    err.code = data?.code
+    throw err
+  }
+  return data?.properties || {}
+}
+
+// Создаёт по строке в базе «Задачи» на каждую задачу, заполняя свойства по их
+// фактическим типам. Возвращает { created, total, error }.
 async function createTaskRows(token, tasksDbId, задачи, meetingRef) {
-  if (!Array.isArray(задачи) || задачи.length === 0) return 0
-
-  const results = await Promise.allSettled(
-    задачи.map((t) => {
+  const tasks = (Array.isArray(задачи) ? задачи : [])
+    .map((t) => {
       const задача = String(t?.задача ?? '').trim()
-      if (!задача) return Promise.resolve(false)
-      const ответственный = String(t?.ответственный ?? 'не указан').trim() || 'не указан'
-      const срок = String(t?.срок ?? 'не указан').trim() || 'не указан'
+      if (!задача) return null
       let приоритет = String(t?.приоритет ?? '').trim().toLowerCase()
       if (!PRIORITIES.includes(приоритет)) приоритет = 'средний'
+      return {
+        Задача: задача,
+        Ответственный: String(t?.ответственный ?? 'не указан').trim() || 'не указан',
+        Срок: String(t?.срок ?? 'не указан').trim() || 'не указан',
+        Приоритет: приоритет,
+        Статус: 'Новая',
+        Совещание: meetingRef,
+      }
+    })
+    .filter(Boolean)
 
-      const richText = (content) => ({
-        rich_text: [{ type: 'text', text: { content: text(content) } }],
-      })
+  if (tasks.length === 0) return { created: 0, total: 0, error: null }
 
-      const properties = {
-        Задача: { title: [{ type: 'text', text: { content: text(задача) } }] },
-        Ответственный: richText(ответственный),
-        Срок: richText(срок),
-        Приоритет: { select: { name: приоритет } },
-        Статус: { select: { name: 'Новая' } },
-        Совещание: richText(meetingRef),
+  let schema
+  try {
+    schema = await fetchTaskSchema(token, tasksDbId)
+  } catch (err) {
+    return { created: 0, total: tasks.length, error: err.message }
+  }
+
+  const results = await Promise.allSettled(
+    tasks.map((row) => {
+      const properties = {}
+      for (const [name, value] of Object.entries(row)) {
+        const prop = schema[name]
+        if (!prop) continue // свойства с таким именем нет в базе — пропускаем
+        const built = valueForType(prop, value)
+        if (built) properties[name] = built
       }
 
       return fetch('https://api.notion.com/v1/pages', {
@@ -91,16 +158,20 @@ async function createTaskRows(token, tasksDbId, задачи, meetingRef) {
       }).then(async (r) => {
         if (!r.ok) {
           const d = await r.json().catch(() => null)
+          const msg = d?.message || `Ошибка Notion (${r.status})`
           console.error('task row error:', r.status, d?.code, d?.message)
-          return false
+          throw new Error(msg)
         }
         return true
       })
     }),
   )
 
-  return results.filter((r) => r.status === 'fulfilled' && r.value === true).length
+  const created = results.filter((r) => r.status === 'fulfilled').length
+  const firstError = results.find((r) => r.status === 'rejected')?.reason?.message || null
+  return { created, total: tasks.length, error: created < tasks.length ? firstError : null }
 }
+
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -223,17 +294,18 @@ export default async function handler(req, res) {
     }
 
     // Помимо страницы совещания — строки в базе «Задачи» (если она задана).
-    let tasksCreated = 0
     const tasksDbId = process.env.NOTION_TASKS_DB_ID
+    let tasks = { configured: false, created: 0, total: задачи.length, error: null }
     if (tasksDbId) {
       const meetingRef = дата ? `${тема} — ${дата}` : тема
-      tasksCreated = await createTaskRows(token, tasksDbId, задачи, meetingRef)
+      const result = await createTaskRows(token, tasksDbId, задачи, meetingRef)
+      tasks = { configured: true, ...result }
     }
 
     return res.status(200).json({
       url: data?.url || null,
       id: data?.id || null,
-      tasksCreated,
+      tasks,
     })
   } catch (err) {
     console.error('save-to-notion error:', err?.message || err)
