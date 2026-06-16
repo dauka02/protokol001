@@ -190,6 +190,28 @@ export default function Protocol({ protocol, onRestart }) {
         </ol>
       )}
 
+      {/* Отладка контактов под строкой Telegram */}
+      {r && !r.telegramError && (
+        <div className="finish-debug mono">
+          {r.telegramContacts.error ? (
+            <>База «Контакты»: {r.telegramContacts.error}</>
+          ) : (
+            <>
+              Контактов загружено: {r.telegramContacts.count}
+              {r.telegramContacts.list.length > 0 && (
+                <ul className="finish-reasons">
+                  {r.telegramContacts.list.map((c, i) => (
+                    <li key={i}>
+                      {c.name} → {c.telegram || 'пусто'}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
       <article className="doc">
         <header className="doc__head">
           <h1 className="doc__title">{p.тема || 'Протокол совещания'}</h1>

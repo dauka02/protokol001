@@ -295,42 +295,53 @@ function propToString(prop) {
       return ''
   }
 }
+// Имя контакта — из свойства, у которого ТИП = "title" (не по жёсткому ключу).
 function readName(properties) {
   for (const value of Object.values(properties || {})) {
-    if (value?.type === 'title') return propToString(value)
+    if (value?.type === 'title') return propToString(value).trim()
   }
   return ''
 }
 
+// Строит карту контактов. НЕ бросает — при ошибке запроса возвращает её текст.
+// Возвращает { entries: Map(нормализованное_имя → значение Telegram), list, error }.
 async function loadContacts(token, contactsDbId) {
-  const map = new Map()
+  const entries = new Map()
+  const list = [] // отладка: [{ name, telegram }]
   let cursor
-  for (let page = 0; page < 20; page += 1) {
-    // eslint-disable-next-line no-await-in-loop
-    const res = await fetch(`https://api.notion.com/v1/databases/${contactsDbId}/query`, {
-      method: 'POST',
-      headers: notionHeaders(token),
-      body: JSON.stringify({ page_size: 100, start_cursor: cursor }),
-    })
-    // eslint-disable-next-line no-await-in-loop
-    const data = await res.json().catch(() => null)
-    if (!res.ok) {
-      const map2 = {
-        unauthorized: 'Нет доступа к базе «Контакты».',
-        object_not_found: 'База «Контакты» не найдена (NOTION_CONTACTS_DB_ID).',
+  try {
+    for (let page = 0; page < 20; page += 1) {
+      const queryBody = cursor ? { page_size: 100, start_cursor: cursor } : { page_size: 100 }
+      // eslint-disable-next-line no-await-in-loop
+      const res = await fetch(`https://api.notion.com/v1/databases/${contactsDbId}/query`, {
+        method: 'POST',
+        headers: notionHeaders(token),
+        body: JSON.stringify(queryBody),
+      })
+      // eslint-disable-next-line no-await-in-loop
+      const data = await res.json().catch(() => null)
+      if (!res.ok) {
+        const m = {
+          unauthorized: 'Нет доступа к базе «Контакты».',
+          object_not_found: 'База «Контакты» не найдена (NOTION_CONTACTS_DB_ID).',
+        }
+        return { entries, list, error: m[data?.code] || data?.message || `Ошибка Notion (${res.status}).` }
       }
-      throw new Error(map2[data?.code] || data?.message || `Ошибка Notion (${res.status}).`)
+      for (const row of data?.results || []) {
+        const name = readName(row.properties) // уже .trim()
+        const telegram = propToString(row.properties?.['Telegram']).trim()
+        if (!name) continue
+        const key = normLower(name)
+        if (!entries.has(key)) entries.set(key, telegram)
+        list.push({ name, telegram })
+      }
+      if (!data?.has_more) break
+      cursor = data?.next_cursor
     }
-    for (const row of data?.results || []) {
-      // Имя — без учёта регистра и с trim; берём колонку именно «Telegram» (не «Телефон»).
-      const name = normLower(readName(row.properties))
-      const telegram = propToString(row.properties?.['Telegram']).trim()
-      if (name && !map.has(name)) map.set(name, telegram)
-    }
-    if (!data?.has_more) break
-    cursor = data?.next_cursor
+  } catch (e) {
+    return { entries, list, error: e?.message || 'Сбой запроса к базе «Контакты».' }
   }
-  return map
+  return { entries, list, error: null }
 }
 
 async function sendTelegram(botToken, chatId, message) {
@@ -367,22 +378,29 @@ async function notifyTelegram(notionToken, botToken, contactsDbId, p) {
       приоритет: String(t?.['приоритет'] ?? 'средний').trim() || 'средний',
     })
   }
-  if (byPerson.size === 0) return { sent: 0, recipients: [], report: [] }
+  // Грузим контакты всегда (для отладки), даже если ответственных нет.
+  const { entries, list, error: contactsError } = await loadContacts(notionToken, contactsDbId)
+  const contacts = { count: list.length, list, error: contactsError }
 
-  const contacts = await loadContacts(notionToken, contactsDbId)
+  if (byPerson.size === 0) return { sent: 0, recipients: [], report: [], contacts }
+
   const dateLabel = дата ? ` (${дата})` : ''
   const recipients = []
   const report = [] // диагностика по каждому ответственному
   let sent = 0
 
   for (const [person, tasks] of byPerson) {
+    if (contactsError) {
+      report.push({ ответственный: person, статус: `база «Контакты»: ${contactsError}` })
+      continue
+    }
     const key = normLower(person)
     // Сопоставляем имя без учёта регистра и с trim.
-    if (!contacts.has(key)) {
+    if (!entries.has(key)) {
       report.push({ ответственный: person, статус: 'контакт не найден' })
       continue
     }
-    const telegram = (contacts.get(key) || '').trim()
+    const telegram = (entries.get(key) || '').trim()
     if (!CHAT_ID.test(telegram)) {
       report.push({
         ответственный: person,
@@ -404,7 +422,7 @@ async function notifyTelegram(notionToken, botToken, contactsDbId, p) {
       report.push({ ответственный: person, статус: `ошибка Telegram: ${error}` })
     }
   }
-  return { sent, recipients, report }
+  return { sent, recipients, report, contacts }
 }
 
 // ============ обработчик ============
@@ -441,6 +459,7 @@ export default async function handler(req, res) {
     telegramSent: 0,
     telegramRecipients: [],
     telegramReport: [],
+    telegramContacts: { count: 0, list: [], error: null },
     telegramError: null,
   }
 
@@ -478,10 +497,16 @@ export default async function handler(req, res) {
     } else if (!notionToken) {
       out.telegramError = 'NOTION_TOKEN не задан'
     } else {
-      const { sent, recipients, report } = await notifyTelegram(notionToken, botToken, contactsDb, p)
+      const { sent, recipients, report, contacts } = await notifyTelegram(
+        notionToken,
+        botToken,
+        contactsDb,
+        p,
+      )
       out.telegramSent = sent
       out.telegramRecipients = recipients
       out.telegramReport = report || []
+      if (contacts) out.telegramContacts = contacts
     }
   } catch (err) {
     out.telegramError = err.message || 'Не удалось отправить в Telegram.'
